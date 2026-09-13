@@ -18,3 +18,24 @@ jobs:
                   python-version: '3.13'
             - name: Compare argument and stdin pattern transport
               run: python .pr/probe_windows_grep.py
+            - name: Install uv
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+              with:
+                  python-version: '3.13'
+            - name: Install dependencies
+              run: uv sync --frozen --group dev
+            - name: Install Chromium
+              run: uvx playwright install chromium
+            - name: Run upstream Windows test suite
+              env:
+                  CI: 'true'
+              run: >-
+                  uv run python -m pytest -q tests/tools
+                  --ignore=tests/tools/browser_use/test_browser_executor_e2e.py
+                  --ignore=tests/tools/file_editor/test_memory_usage.py
+                  --ignore=tests/tools/terminal/test_conversation_cleanup.py
+                  --ignore=tests/tools/terminal/test_session_factory.py
+                  --ignore=tests/tools/terminal/test_shell_path_configuration.py
+                  --ignore=tests/tools/terminal/test_shutdown_handling.py
+                  --ignore=tests/tools/terminal/test_terminal_session.py
+                  --ignore=tests/tools/terminal/test_terminal_tool_auto_detection.py

@@ -1,6 +1,7 @@
 """Compare native Python to MSYS grep argument and stdin transport."""
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -27,19 +28,27 @@ def main():
                 if pattern in ("", "foo\n")
                 else ["matching.txt"]
             )
-            for method in ("argv", "stdin"):
+            for method in ("argv", "stdin", "binary_stdin"):
                 cmd = [binary, "-E", "-R", "-I", "-l", "-i"]
                 kwargs = {}
-                if method == "stdin":
+                if method in ("stdin", "binary_stdin"):
                     cmd.extend(["-f", "-"])
                     kwargs["input"] = pattern + "\n"
+                    if method == "binary_stdin":
+                        kwargs["input"] = os.fsencode(kwargs["input"])
                 else:
                     cmd.append(pattern)
                 cmd.append(str(root))
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, check=False, **kwargs
+                    cmd,
+                    capture_output=True,
+                    text=method != "binary_stdin",
+                    check=False,
+                    **kwargs,
                 )
-                matches = sorted(Path(p).name for p in result.stdout.splitlines())
+                matches = sorted(
+                    Path(p).name for p in os.fsdecode(result.stdout).splitlines()
+                )
                 print(
                     json.dumps(
                         {
@@ -47,12 +56,12 @@ def main():
                             "method": method,
                             "returncode": result.returncode,
                             "matches": matches,
-                            "stderr": result.stderr,
+                            "stderr": os.fsdecode(result.stderr),
                             "expected": expected,
                         }
                     )
                 )
-                if method == "stdin":
+                if method == "binary_stdin":
                     assert result.returncode == 0 and matches == expected
 
 
