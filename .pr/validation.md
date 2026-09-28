@@ -3,6 +3,14 @@
 Base: `9c3571a694547734002518bd94b3cb41a187f9b6`. Tested on macOS with Python 3.13.13.
 Updated with upstream `76e9e250` before the prompt-cache regression fix.
 
+## DeepSeek live follow-up (2026-09-28)
+
+The [live DeepSeek comparison](deepseek-live-validation.md) sent SDK-serialized
+messages to the official `deepseek-flash` Chat Completions API. All five cases
+returned HTTP 200 on both matched base `a350dc73` and PR revision `86f87ccf`.
+This adds compatibility evidence, but does not reproduce the TokenRouter error.
+The report links the program, exact request bodies, responses, and limitations.
+
 ## Revalidation after syncing main (2026-09-26)
 
 Merged upstream `a350dc73ef9b4d3a801ffab2aed211a04d2120a9` without conflicts.
@@ -81,8 +89,9 @@ Merging upstream #4968 resolved the four previously documented baseline
 dynamic-attribute violations.
 
 The copied reproduction also passed its applicable Python pre-commit checks.
-No remote-provider, agent benchmark, or evaluation run was performed. A
-maintainer-triggered lightweight eval and human review remain outstanding, as
-requested in the review. The local HTTP checks are not benchmark evidence.
+The local runs in this section did not call a remote provider. See the separate
+September 28 DeepSeek follow-up above for live API evidence. No Agent benchmark
+was run; any additional evaluation remains a maintainer decision. The local HTTP
+checks are not benchmark evidence.
 This is an internal serialization correction; no public signatures, schema,
 settings defaults, dependencies, or examples change.
