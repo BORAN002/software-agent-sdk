@@ -7,6 +7,12 @@ returned the correct file in both cases. See the [recorded evidence](
 live-grep-2026-10-05/README.md). Preparation checks alone do not count as live
 Agent or benchmark validation.
 
+The [frozen harness](live-grep-2026-10-05/repro_live_grep_agent.py) is the exact
+script used for those recorded conversations; its hash matches both environment
+files. The current harness below adds stricter event-order and agent-error
+validation. These additional checks can also be applied to the saved event
+streams without making new model calls. Historical logs and hashes are unchanged.
+
 This script exercises the real `Agent` / `LocalConversation` / `GrepTool` path.
 It does **not** exercise the terminal-command compatibility fallback. Existing
 Windows evidence covers the lower-level transport separately. Any separately
@@ -67,9 +73,11 @@ Both cases use the identical prompt and real fixture contents; no model response
 or tool results are mocked. Exactly one grep call per requested pattern is
 required, with the specified absolute directory, `*.txt` include, a successful
 observation, and the expected full matching paths. Retries or altered patterns,
-an unfinished conversation, conversation error events, or a logged system-grep
-failure that falls back to Python fail validation. Review any nonzero exit
-before treating the run as evidence.
+an unfinished conversation, agent/conversation error events, or a logged
+system-grep failure that falls back to Python fail validation. The single finish
+call must follow both grep observations and come from a later model response;
+extra tool calls also fail validation. Review any nonzero exit before treating
+the run as evidence, and inspect the final answer's accuracy separately.
 
 | Pattern | Expected base result | Expected fixed result |
 | --- | --- | --- |

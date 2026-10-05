@@ -19,20 +19,13 @@ import tempfile
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
 from openhands.sdk import LLM, Agent, LocalConversation, Tool
 from openhands.sdk.conversation.state import ConversationExecutionStatus
-from openhands.sdk.event import (
-    ActionEvent,
-    AgentErrorEvent,
-    Event,
-    MessageEvent,
-    ObservationEvent,
-)
+from openhands.sdk.event import ActionEvent, Event, MessageEvent, ObservationEvent
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.tool.builtins.finish import FinishAction
 from openhands.tools.grep import GrepAction, GrepExecutor, GrepObservation, GrepTool
@@ -128,65 +121,6 @@ def validate_calls(
     return errors
 
 
-def validate_event_sequence(entries: list[dict[str, Any]]) -> list[str]:
-    """Validate recorded events without constructing an agent or calling a model."""
-    errors: list[str] = []
-    for error_type in ("AgentErrorEvent", "ConversationErrorEvent"):
-        if any(entry["event"] == error_type for entry in entries):
-            errors.append(f"Conversation emitted {error_type}")
-    actions = [
-        (index, entry)
-        for index, entry in enumerate(entries)
-        if entry["event"] == "ActionEvent"
-    ]
-    if [entry["tool_call"]["name"] for _, entry in actions] != [
-        "grep",
-        "grep",
-        "finish",
-    ]:
-        errors.append("Expected exactly two grep calls followed by one finish call")
-        return errors
-    observations = [
-        (index, entry)
-        for index, entry in enumerate(entries)
-        if entry["event"] == "ObservationEvent"
-    ]
-    if [entry["tool_name"] for _, entry in observations] != ["grep", "grep", "finish"]:
-        errors.append(
-            "Expected two grep observations followed by one finish observation"
-        )
-        return errors
-    call_ids = [entry["tool_call"]["id"] for _, entry in actions]
-    if len(set(call_ids)) != len(call_ids):
-        errors.append("Tool call IDs must be unique")
-    for action_index, action in actions:
-        matches = [
-            (index, entry)
-            for index, entry in observations
-            if entry["tool_call_id"] == action["tool_call"]["id"]
-        ]
-        if (
-            len(matches) != 1
-            or matches[0][0] <= action_index
-            or matches[0][1]["tool_name"] != action["tool_call"]["name"]
-        ):
-            errors.append("Each call must have one subsequent matching observation")
-    finish_index, finish = actions[-1]
-    if finish_index <= max(index for index, _ in observations[:2]):
-        errors.append("Finish must follow both grep observations")
-    response_ids = [entry["llm_response_id"] for _, entry in actions]
-    if any(
-        not isinstance(response_id, str) or not response_id
-        for response_id in response_ids
-    ):
-        errors.append("Each action must identify its model response")
-    elif finish["llm_response_id"] in response_ids[:2]:
-        errors.append(
-            "Finish must come from a later model response than both grep calls"
-        )
-    return errors
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expect", choices=("base", "head"), required=True)
@@ -273,8 +207,6 @@ def main() -> int:
     grep_observations: list[ObservationEvent] = []
     tool_calls: list[str] = []
     finish_actions: list[dict[str, str]] = []
-    entries: list[dict[str, Any]] = []
-    agent_errors: list[str] = []
     conversation_errors: list[str] = []
     grep_logger = logging.getLogger(GrepExecutor.__module__)
     grep_fallbacks = GrepFallbackLogHandler()
@@ -341,14 +273,8 @@ def main() -> int:
                 elif isinstance(event, ConversationErrorEvent):
                     entry["code"] = event.code
                     conversation_errors.append(event.code)
-                elif isinstance(event, AgentErrorEvent):
-                    entry["tool_name"] = event.tool_name
-                    entry["tool_call_id"] = str(event.tool_call_id)
-                    entry["error"] = event.error
-                    agent_errors.append(event.error)
                 else:
                     return
-                entries.append(entry)
                 line = json.dumps(entry)
                 with (output / "events.jsonl").open("a") as file:
                     file.write(line + "\n")
@@ -379,9 +305,10 @@ def main() -> int:
             errors = validate_calls(
                 grep_actions, grep_observations, workspace, expected
             )
-            errors.extend(validate_event_sequence(entries))
             if final_status != ConversationExecutionStatus.FINISHED:
                 errors.append(f"Conversation did not finish: {final_status.value}")
+            if conversation_errors:
+                errors.append("Conversation emitted error events")
             if grep_fallbacks.messages:
                 errors.append("System grep failed and fell back to Python search")
             summary = {
@@ -396,7 +323,6 @@ def main() -> int:
                 "tool_calls": tool_calls,
                 "final_status": final_status.value,
                 "finish_actions": finish_actions,
-                "agent_errors": agent_errors,
                 "conversation_errors": conversation_errors,
                 "grep_fallbacks": grep_fallbacks.messages,
                 "validation_errors": errors,

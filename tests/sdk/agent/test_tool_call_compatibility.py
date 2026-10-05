@@ -374,6 +374,10 @@ def test_grep_terminal_command_falls_back_to_grep(monkeypatch, tmp_path):
     assert "python -c" not in command
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="requires POSIX shell quoting",
+)
 @pytest.mark.skipif(shutil.which("grep") is None, reason="grep not available")
 def test_grep_regex_arguments_can_fall_back_to_system_grep(monkeypatch, tmp_path):
     original_which = shutil.which

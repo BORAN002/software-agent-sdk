@@ -22,7 +22,7 @@ The exact fixture contents and prompt are included in each `environment.json`.
 - Each checkout had its own virtual environment, installed with
   `uv sync --frozen --dev`; both used the same `uv.lock` and harness hashes.
 - The only tracked local change during the head run was the evidence harness
-  included in this commit. Production source was unchanged from the tested head.
+  preserved below. Production source was unchanged from the tested head.
 - `PATH` contained only a symlink to `/usr/bin/grep`; `rg` resolved to `null` in
   both runs. The tool's startup log confirms selection of the system-grep backend.
 
@@ -31,6 +31,13 @@ absolute fixture path. After the base run, its fixture directory was moved aside
 and the head run recreated it at the same path. Each conversation had at most
 five iterations, a 1,024-token output limit, no LLM retries, a 60-second request
 timeout, and the harness's $1 SDK budget (not a guaranteed provider billing cap).
+
+The [frozen harness](repro_live_grep_agent.py) is the exact script used for these
+conversations, with SHA-256
+`7c7e1ae7a304a6206cda316325829674ba14d9ff2813bde17db07fe88706bdbc`.
+This matches `harness_sha256` in both environment files. Later validation
+improvements are in [the current harness](../repro_live_grep_agent.py); the
+recorded events, summaries, environment files, and historical hashes are unchanged.
 
 ## Evidence
 
@@ -45,6 +52,19 @@ call in a subsequent model response. Both finished normally, with no validation
 errors, conversation error events, or logged system-grep failures/Python fallback.
 The final messages accurately reported the returned filenames. No model
 responses or tool observations were mocked.
+
+The saved base/head streams also pass the current validator's stricter checks
+for errors, extra calls, call/observation pairing, and a finish in a later model
+response after both grep observations. This is an offline recheck of the same
+two conversations. The [offline tests](../test_live_grep_event_sequence.py) cover
+both recorded streams and invalid event sequences: 12 passed.
+
+From the checkout root:
+
+```sh
+UV_OFFLINE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run --frozen pytest \
+  -o addopts='' .pr/test_live_grep_event_sequence.py
+```
 
 In the base summary, `matches_expected_revision_behavior: true` means the
 original defect was reproduced, not that the base returned correct matches.
