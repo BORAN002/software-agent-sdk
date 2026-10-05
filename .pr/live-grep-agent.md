@@ -1,9 +1,11 @@
 # Real Agent validation for #4984
 
-**Status: not run against a real model.** The contributor has no cloud LLM API
-available. A maintainer with a configured service needs to execute the two runs
-below and attach the resulting evidence. Preparation and object-construction
-checks do not count as live Agent or benchmark validation.
+**Status: real-model base/head comparison completed on 2026-10-05.** Both
+conversations used DeepSeek's public API with `deepseek-flash` on macOS, with
+`rg` unavailable. The base reproduced both incorrect results; the PR head
+returned the correct file in both cases. See the [recorded evidence](
+live-grep-2026-10-05/README.md). Preparation checks alone do not count as live
+Agent or benchmark validation.
 
 This script exercises the real `Agent` / `LocalConversation` / `GrepTool` path.
 It does **not** exercise the terminal-command compatibility fallback. Existing
@@ -23,6 +25,12 @@ maintainer's environment. Do not put credentials in commands, logs, or artifacts
 The model must support tool calling. Each conversation permits at most five
 iterations and sets a $1 SDK cost budget; provider-reported pricing determines
 cost accounting, so this is not a guaranteed provider billing cap.
+
+The recorded run used `LLM_MODEL=deepseek/deepseek-flash`,
+`LLM_BASE_URL=https://api.deepseek.com`, and
+`LLM_EXTRA_BODY='{"thinking":{"type":"disabled"}}'`. The optional
+`LLM_EXTRA_BODY` setting accepts only `thinking.type` (`enabled` or `disabled`)
+and is recorded with the environment; use identical settings on both checkouts.
 
 From the PR checkout, in a POSIX shell:
 
@@ -58,8 +66,10 @@ host's `grep`, so `rg` cannot be found. The original path is restored afterward.
 Both cases use the identical prompt and real fixture contents; no model responses
 or tool results are mocked. Exactly one grep call per requested pattern is
 required, with the specified absolute directory, `*.txt` include, a successful
-observation, and the expected full matching paths. Retries or altered patterns
-fail validation. Review any nonzero exit before treating the run as evidence.
+observation, and the expected full matching paths. Retries or altered patterns,
+an unfinished conversation, conversation error events, or a logged system-grep
+failure that falls back to Python fail validation. Review any nonzero exit
+before treating the run as evidence.
 
 | Pattern | Expected base result | Expected fixed result |
 | --- | --- | --- |

@@ -2,12 +2,14 @@
 
 Use the same script, model, workspace, and prompt on the base and PR checkouts.
 LLM_API_KEY, LLM_MODEL, and optionally LLM_BASE_URL configure the real service.
+LLM_EXTRA_BODY optionally accepts {"thinking": {"type": "disabled"}} or "enabled".
 """
 
 import argparse
 import hashlib
 import inspect
 import json
+import logging
 import os
 import platform
 import shutil
@@ -15,12 +17,17 @@ import subprocess
 import sys
 import tempfile
 from datetime import UTC, datetime
+from importlib.metadata import version
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
 from openhands.sdk import LLM, Agent, LocalConversation, Tool
+from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import ActionEvent, Event, MessageEvent, ObservationEvent
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
+from openhands.sdk.tool.builtins.finish import FinishAction
 from openhands.tools.grep import GrepAction, GrepExecutor, GrepObservation, GrepTool
 
 
@@ -36,6 +43,33 @@ Preserve both patterns exactly; do not simplify, correct, or retry them.
 Report the matching filenames returned by each tool call, including empty
 results. Do not infer results from the filenames. Then finish.
 """
+
+
+class GrepFallbackLogHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if "grep backend failed" in message:
+            self.messages.append(message)
+
+
+def endpoint_origin(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parsed = urlsplit(url)
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return "<invalid endpoint>"
+    if not parsed.scheme or not host:
+        return "<invalid endpoint>"
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None:
+        authority += f":{port}"
+    return f"{parsed.scheme}://{authority}"
 
 
 def validate_calls(
@@ -94,6 +128,16 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
+    try:
+        extra_body = json.loads(os.environ.get("LLM_EXTRA_BODY", "{}"))
+    except json.JSONDecodeError:
+        parser.error("LLM_EXTRA_BODY must be a JSON object")
+    if extra_body not in (
+        {},
+        {"thinking": {"type": "disabled"}},
+        {"thinking": {"type": "enabled"}},
+    ):
+        parser.error("LLM_EXTRA_BODY supports only thinking.type: enabled or disabled")
     workspace = args.workspace.resolve()
     output = args.output.resolve()
     if output == workspace or workspace in output.parents:
@@ -134,10 +178,22 @@ def main() -> int:
         "grep_binary": grep,
         "grep_source": str(source),
         "grep_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "uv_lock_sha256": hashlib.sha256(
+            (checkout / "uv.lock").read_bytes()
+        ).hexdigest(),
+        "litellm_version": version("litellm"),
+        "tracked_changes": subprocess.check_output(
+            ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+            text=True,
+            cwd=checkout,
+        ).splitlines(),
         "imported_sources": {
             name: str(path) for name, path in imported_sources.items()
         },
         "model": os.environ.get("LLM_MODEL"),
+        "endpoint_origin": endpoint_origin(os.environ.get("LLM_BASE_URL")),
+        "litellm_extra_body": extra_body,
         "prompt": PROMPT,
         "fixtures": {
             directory: {"matching.txt": matching, "other.txt": other}
@@ -146,11 +202,14 @@ def main() -> int:
         "path_isolation": "PATH contains only a symlink to system grep; no rg",
         "prepare_only": args.prepare_only,
     }
-    (output / "environment.json").write_text(json.dumps(metadata, indent=2) + "\n")
     original_path = os.environ.get("PATH", "")
     grep_actions: list[ActionEvent] = []
     grep_observations: list[ObservationEvent] = []
     tool_calls: list[str] = []
+    finish_actions: list[dict[str, str]] = []
+    conversation_errors: list[str] = []
+    grep_logger = logging.getLogger(GrepExecutor.__module__)
+    grep_fallbacks = GrepFallbackLogHandler()
 
     with tempfile.TemporaryDirectory(prefix="openhands-grep-only-") as binary_dir:
         (Path(binary_dir) / "grep").symlink_to(grep)
@@ -158,6 +217,11 @@ def main() -> int:
         try:
             assert shutil.which("rg") is None
             assert shutil.which("grep") is not None
+            metadata["isolated_rg_binary"] = shutil.which("rg")
+            metadata["isolated_grep_binary"] = shutil.which("grep")
+            (output / "environment.json").write_text(
+                json.dumps(metadata, indent=2) + "\n"
+            )
             if args.prepare_only:
                 print("Prepared fixtures and isolated PATH; no model was called.")
                 return 0
@@ -169,6 +233,7 @@ def main() -> int:
                 model=model,
                 api_key=SecretStr(key),
                 base_url=os.environ.get("LLM_BASE_URL"),
+                litellm_extra_body=extra_body,
                 max_output_tokens=1024,
                 num_retries=0,
                 timeout=60,
@@ -185,6 +250,14 @@ def main() -> int:
                     tool_calls.append(event.tool_call.name)
                     if event.tool_name == GrepTool.name:
                         grep_actions.append(event)
+                    elif isinstance(event.action, FinishAction):
+                        finish_actions.append(
+                            {
+                                "tool_call_id": str(event.tool_call_id),
+                                "llm_response_id": str(event.llm_response_id),
+                                "message": event.action.message,
+                            }
+                        )
                 elif isinstance(event, ObservationEvent):
                     entry["tool_name"] = event.tool_name
                     entry["tool_call_id"] = str(event.tool_call_id)
@@ -197,6 +270,9 @@ def main() -> int:
                         item.model_dump(mode="json")
                         for item in event.llm_message.content
                     ]
+                elif isinstance(event, ConversationErrorEvent):
+                    entry["code"] = event.code
+                    conversation_errors.append(event.code)
                 else:
                     return
                 line = json.dumps(entry)
@@ -204,6 +280,7 @@ def main() -> int:
                     file.write(line + "\n")
                 print(line, flush=True)
 
+            grep_logger.addHandler(grep_fallbacks)
             conversation = LocalConversation(
                 agent=Agent(llm=llm, tools=[Tool(name=GrepTool.name)]),
                 workspace=workspace,
@@ -215,6 +292,8 @@ def main() -> int:
             try:
                 conversation.send_message(PROMPT)
                 conversation.run()
+                with conversation.state:
+                    final_status = conversation.state.execution_status
             finally:
                 conversation.close()
             expected = {pattern: ["matching.txt"] for pattern in CASES}
@@ -226,6 +305,12 @@ def main() -> int:
             errors = validate_calls(
                 grep_actions, grep_observations, workspace, expected
             )
+            if final_status != ConversationExecutionStatus.FINISHED:
+                errors.append(f"Conversation did not finish: {final_status.value}")
+            if conversation_errors:
+                errors.append("Conversation emitted error events")
+            if grep_fallbacks.messages:
+                errors.append("System grep failed and fell back to Python search")
             summary = {
                 "observed": [
                     {
@@ -236,6 +321,10 @@ def main() -> int:
                 ],
                 "expected": expected,
                 "tool_calls": tool_calls,
+                "final_status": final_status.value,
+                "finish_actions": finish_actions,
+                "conversation_errors": conversation_errors,
+                "grep_fallbacks": grep_fallbacks.messages,
                 "validation_errors": errors,
                 "matches_expected_revision_behavior": not errors,
                 "reported_cost_usd": llm.metrics.accumulated_cost,
@@ -244,6 +333,7 @@ def main() -> int:
             print(json.dumps(summary), flush=True)
             return 0 if not errors else 1
         finally:
+            grep_logger.removeHandler(grep_fallbacks)
             os.environ["PATH"] = original_path
 
 
